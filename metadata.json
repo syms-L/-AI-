@@ -1,0 +1,5 @@
+{
+  "name": "AI Compute Estimator",
+  "description": "A web-based tool for estimating compute requirements and recommending NVIDIA Jetson hardware for real-time video processing.",
+  "requestFramePermissions": []
+}
