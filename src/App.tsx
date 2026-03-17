@@ -35,6 +35,19 @@ const CV_ALGORITHMS = {
   'High': { name: '高 (如 密集光流, 3D 重建)', gflops: 50 },
 };
 
+const STORAGE_MODES = {
+  'None': { name: '不存储 (仅内存处理)' },
+  'VideoStream': { name: '保存视频流 (H.264/265)' },
+  'FrameImages': { name: '保存抽帧图片 (JPEG)' },
+  'Metadata': { name: '仅保存元数据 (JSON/DB)' },
+};
+
+const STORAGE_MEDIUMS = {
+  'eMMC_SD': { name: 'eMMC / SD卡', maxThroughput: 80, maxIops: 2000 },
+  'SATA_SSD': { name: 'SATA SSD', maxThroughput: 500, maxIops: 50000 },
+  'NVMe_SSD': { name: 'NVMe SSD', maxThroughput: 2500, maxIops: 200000 },
+};
+
 // nvdecPps: NVDEC 硬件解码上限 (Pixels Per Second)。
 // 参考: 18x 1080p30 = 18 * 1920 * 1080 * 30 ≈ 1.12 GPixels/s
 const DEVICES = [
@@ -70,12 +83,14 @@ export default function App() {
   const [model, setModel] = useState<keyof typeof MODELS>('YOLOv8s');
   const [cvAlgo, setCvAlgo] = useState<keyof typeof CV_ALGORITHMS>('None');
   const [precision, setPrecision] = useState<'INT8' | 'FP16'>('INT8');
+  const [storageMode, setStorageMode] = useState<keyof typeof STORAGE_MODES>('None');
+  const [storageMedium, setStorageMedium] = useState<keyof typeof STORAGE_MEDIUMS>('eMMC_SD');
   const [manualDeviceIndex, setManualDeviceIndex] = useState<number | null>(null);
 
   // 当输入参数改变时，重置手动选择的设备
   useEffect(() => {
     setManualDeviceIndex(null);
-  }, [cameras, format, resolution, fps, model, cvAlgo, precision]);
+  }, [cameras, format, resolution, fps, model, cvAlgo, precision, storageMode, storageMedium]);
 
   // --- 核心计算逻辑 ---
   const results = useMemo(() => {
@@ -156,6 +171,33 @@ export default function App() {
     // 总预估延迟
     const estimatedMsPerFrame = aiLatency + cvLatency + decodeLatency;
 
+    // 6. 存储与 I/O 计算
+    let requiredThroughput = 0; // MB/s
+    let requiredIops = 0;
+
+    if (storageMode === 'VideoStream') {
+      // 假设 H.265 编码，0.1 bits per pixel
+      const mbpsPerCam = (resData.pixels * fps * 0.1) / 1024 / 1024 / 8;
+      requiredThroughput = cameras * mbpsPerCam;
+      requiredIops = cameras * (fps / 30); // 连续写入，IOPS 极低，假设每秒 1 次 I/O
+    } else if (storageMode === 'FrameImages') {
+      // 假设 JPEG 压缩率 10%
+      const mbPerFrame = (resData.pixels * 3 * 0.1) / 1024 / 1024;
+      requiredThroughput = cameras * mbPerFrame * fps;
+      requiredIops = cameras * fps; // 每帧一个文件，高 IOPS
+    } else if (storageMode === 'Metadata') {
+      // 假设每帧 2KB JSON 数据
+      const mbPerFrame = 2 / 1024;
+      requiredThroughput = cameras * mbPerFrame * fps;
+      requiredIops = cameras * (fps / 10); // 假设批量写入，每 10 帧一次 I/O
+    }
+
+    const activeStorage = STORAGE_MEDIUMS[storageMedium];
+    const throughputPercent = (requiredThroughput / activeStorage.maxThroughput) * 100;
+    const iopsPercent = (requiredIops / activeStorage.maxIops) * 100;
+
+    const isOverloaded = loadPercent > 100 || cvLoadPercent > 100 || vramPercent > 100 || throughputPercent > 100 || iopsPercent > 100;
+
     return {
       requiredTops,
       requiredCvGflops,
@@ -170,9 +212,15 @@ export default function App() {
       loadPercent,
       cvLoadPercent,
       vramPercent,
-      estimatedMsPerFrame
+      estimatedMsPerFrame,
+      requiredThroughput,
+      requiredIops,
+      activeStorage,
+      throughputPercent,
+      iopsPercent,
+      isOverloaded
     };
-  }, [cameras, format, resolution, fps, model, cvAlgo, precision, manualDeviceIndex]);
+  }, [cameras, format, resolution, fps, model, cvAlgo, precision, storageMode, storageMedium, manualDeviceIndex]);
 
   // 负载条颜色辅助函数
   const getLoadColor = (percent: number) => {
@@ -341,6 +389,45 @@ export default function App() {
               </div>
             </section>
 
+            {/* 模块三：存储与 I/O 配置 (Storage) */}
+            <section className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-lg">
+              <div className="flex items-center gap-2 mb-6">
+                <HardDrive className="w-5 h-5 text-orange-400" />
+                <h2 className="text-lg font-medium">存储与 I/O 配置 (Storage)</h2>
+              </div>
+              
+              <div className="space-y-5">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-400 mb-2">数据存储模式</label>
+                  <select 
+                    value={storageMode} 
+                    onChange={(e) => setStorageMode(e.target.value as keyof typeof STORAGE_MODES)}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-orange-500/50 focus:border-orange-500 outline-none transition-all"
+                  >
+                    {Object.entries(STORAGE_MODES).map(([k, v]) => (
+                      <option key={k} value={k}>{v.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-zinc-400 mb-2">目标存储介质</label>
+                  <select 
+                    value={storageMedium} 
+                    onChange={(e) => setStorageMedium(e.target.value as keyof typeof STORAGE_MEDIUMS)}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-orange-500/50 focus:border-orange-500 outline-none transition-all"
+                  >
+                    {Object.entries(STORAGE_MEDIUMS).map(([k, v]) => (
+                      <option key={k} value={k}>{v.name} (最高 {v.maxThroughput} MB/s)</option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-zinc-500 mt-2">
+                    * 不同的存储介质决定了 I/O 吞吐量和并发写入 (IOPS) 的上限。
+                  </p>
+                </div>
+              </div>
+            </section>
+
           </div>
 
           {/* 右侧：输出与推荐 */}
@@ -350,7 +437,7 @@ export default function App() {
             <section className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-lg">
               <h2 className="text-lg font-medium mb-6">估算结果展示 (Output)</h2>
               
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <Tooltip content={
                   <div className="space-y-2">
                     <h4 className="font-semibold text-emerald-400 border-b border-zinc-700 pb-1">AI 算力 (TOPS)</h4>
@@ -434,6 +521,38 @@ export default function App() {
                     </p>
                   </div>
                 </Tooltip>
+
+                <Tooltip content={
+                  <div className="space-y-2">
+                    <h4 className="font-semibold text-orange-400 border-b border-zinc-700 pb-1">存储吞吐量与 IOPS</h4>
+                    <ul className="list-disc pl-4 space-y-1 text-zinc-400 mt-1">
+                      <li><strong>视频流:</strong> 连续大块写入，吞吐量低 (H.264/265 压缩后)，IOPS 极低。</li>
+                      <li><strong>抽帧图片:</strong> 每帧保存独立 JPEG，吞吐量高，IOPS 极高 (等于总帧率)。</li>
+                      <li><strong>元数据:</strong> 保存 JSON 或写入数据库，吞吐量极低，IOPS 视批量写入策略而定。</li>
+                    </ul>
+                  </div>
+                }>
+                  <div className={`bg-zinc-950 border rounded-xl p-5 relative overflow-hidden group cursor-help ${results.throughputPercent > 100 || results.iopsPercent > 100 ? 'border-red-900/50' : 'border-zinc-800/50'}`}>
+                    <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                      <HardDrive className={`w-16 h-16 ${results.throughputPercent > 100 || results.iopsPercent > 100 ? 'text-red-500' : 'text-orange-500'}`} />
+                    </div>
+                    <p className="text-sm font-medium text-zinc-400 mb-1 flex items-center gap-1">存储吞吐量 & IOPS <Info className="w-3 h-3" /></p>
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-baseline gap-2">
+                        <span className={`text-3xl font-bold ${results.throughputPercent > 100 ? 'text-red-400' : 'text-orange-400'}`}>
+                          {results.requiredThroughput < 1 && results.requiredThroughput > 0 ? results.requiredThroughput.toFixed(2) : results.requiredThroughput.toFixed(1)}
+                        </span>
+                        <span className="text-sm text-zinc-500 font-mono">MB/s</span>
+                      </div>
+                      <div className="flex items-baseline gap-2">
+                        <span className={`text-xl font-bold ${results.iopsPercent > 100 ? 'text-red-400' : 'text-orange-400'}`}>
+                          {Math.ceil(results.requiredIops)}
+                        </span>
+                        <span className="text-xs text-zinc-500 font-mono">IOPS</span>
+                      </div>
+                    </div>
+                  </div>
+                </Tooltip>
               </div>
             </section>
 
@@ -465,28 +584,28 @@ export default function App() {
               {results.activeDevice && (
                 <div className="space-y-4">
                   {/* 推荐设备卡片 */}
-                  <div className={`border rounded-xl p-6 ${results.loadPercent > 100 || results.cvLoadPercent > 100 || results.vramPercent > 100 ? 'bg-red-950/20 border-red-900/50' : 'bg-emerald-950/20 border-emerald-900/50'}`}>
+                  <div className={`border rounded-xl p-6 ${results.isOverloaded ? 'bg-red-950/20 border-red-900/50' : 'bg-emerald-950/20 border-emerald-900/50'}`}>
                     <div className="flex items-center gap-2 mb-2">
-                      {results.loadPercent > 100 || results.cvLoadPercent > 100 || results.vramPercent > 100 ? (
+                      {results.isOverloaded ? (
                         <AlertTriangle className="w-5 h-5 text-red-500" />
                       ) : (
                         <CheckCircle2 className="w-5 h-5 text-emerald-500" />
                       )}
-                      <h3 className={`text-xl font-bold ${results.loadPercent > 100 || results.cvLoadPercent > 100 || results.vramPercent > 100 ? 'text-red-50' : 'text-emerald-50'}`}>
+                      <h3 className={`text-xl font-bold ${results.isOverloaded ? 'text-red-50' : 'text-emerald-50'}`}>
                         {results.activeDevice.name}
                         {manualDeviceIndex !== null && <span className="ml-2 text-xs font-normal px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-300 border border-zinc-700 align-middle">手动选择</span>}
                       </h3>
                     </div>
-                    <p className={`text-sm ${results.loadPercent > 100 || results.cvLoadPercent > 100 || results.vramPercent > 100 ? 'text-red-200/70' : 'text-emerald-200/70'}`}>
+                    <p className={`text-sm ${results.isOverloaded ? 'text-red-200/70' : 'text-emerald-200/70'}`}>
                       该设备提供 {results.activeDevice.tops} TOPS (AI) 和 {results.activeDevice.gflops} GFLOPS (CV) 算力，以及 {results.activeDevice.ram}GB 显存。
-                      {results.loadPercent > 100 || results.cvLoadPercent > 100 || results.vramPercent > 100 
-                        ? `当前需求已超出该设备上限，请升级设备或降低处理参数。` 
-                        : `能够满足当前计算需求。`}
+                      {results.isOverloaded 
+                        ? `当前需求已超出该设备或存储的上限，请升级配置或降低处理参数。` 
+                        : `能够满足当前计算与 I/O 需求。`}
                     </p>
                   </div>
 
                   {/* 性能图表 (负载率) */}
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div className="bg-zinc-950 border border-zinc-800/50 rounded-xl p-5">
                       <div className="flex justify-between items-end mb-2">
                         <h4 className="text-sm font-medium text-zinc-400">AI 算力负载 (TOPS)</h4>
@@ -541,6 +660,25 @@ export default function App() {
                       <div className="flex justify-between text-xs text-zinc-500 mt-2">
                         <span>0 GB</span>
                         <span>{results.activeDevice.ram} GB (Max)</span>
+                      </div>
+                    </div>
+
+                    <div className="bg-zinc-950 border border-zinc-800/50 rounded-xl p-5">
+                      <div className="flex justify-between items-end mb-2">
+                        <h4 className="text-sm font-medium text-zinc-400">存储 I/O 负载</h4>
+                        <span className={`text-lg font-bold ${getLoadTextColor(Math.max(results.throughputPercent, results.iopsPercent))}`}>
+                          {Math.max(results.throughputPercent, results.iopsPercent).toFixed(1)}%
+                        </span>
+                      </div>
+                      <div className="w-full bg-zinc-800 rounded-full h-3 overflow-hidden">
+                        <div 
+                          className={`h-full rounded-full transition-all duration-500 ease-out ${getLoadColor(Math.max(results.throughputPercent, results.iopsPercent))}`}
+                          style={{ width: `${Math.min(100, Math.max(results.throughputPercent, results.iopsPercent))}%` }}
+                        ></div>
+                      </div>
+                      <div className="flex justify-between text-xs text-zinc-500 mt-2">
+                        <span>0</span>
+                        <span>{results.activeStorage.name} (Max)</span>
                       </div>
                     </div>
                   </div>
