@@ -15,9 +15,9 @@ const FORMATS = [
   { id: 'H.264', name: 'H.264', hwDecode: true, decodeMultiplier: 1.0 },
   { id: 'H.265', name: 'H.265 (HEVC)', hwDecode: true, decodeMultiplier: 1.2 },
   { id: 'MJPG', name: 'MJPEG', hwDecode: false, decodeMultiplier: 1.5 },
-  { id: 'Raw', name: 'Raw', hwDecode: false, decodeMultiplier: 0.5 },
-  { id: 'YUV', name: 'YUV', hwDecode: false, decodeMultiplier: 0.5 },
-  { id: 'YUY2', name: 'YUY2', hwDecode: false, decodeMultiplier: 0.5 },
+  { id: 'Raw', name: 'Raw', hwDecode: false, decodeMultiplier: 3.0 }, // Raw data requires significant memory bandwidth and processing
+  { id: 'YUV', name: 'YUV', hwDecode: false, decodeMultiplier: 2.0 },
+  { id: 'YUY2', name: 'YUY2', hwDecode: false, decodeMultiplier: 2.0 },
 ];
 
 const MODELS = {
@@ -85,12 +85,18 @@ export default function App() {
   const [precision, setPrecision] = useState<'INT8' | 'FP16'>('INT8');
   const [storageMode, setStorageMode] = useState<keyof typeof STORAGE_MODES>('None');
   const [storageMedium, setStorageMedium] = useState<keyof typeof STORAGE_MEDIUMS>('eMMC_SD');
+  const [extractRate, setExtractRate] = useState<number>(1); // 抽帧率 (每秒抽几帧)
   const [manualDeviceIndex, setManualDeviceIndex] = useState<number | null>(null);
+
+  // 折叠状态
+  const [isInputExpanded, setIsInputExpanded] = useState(true);
+  const [isProcessingExpanded, setIsProcessingExpanded] = useState(true);
+  const [isStorageExpanded, setIsStorageExpanded] = useState(true);
 
   // 当输入参数改变时，重置手动选择的设备
   useEffect(() => {
     setManualDeviceIndex(null);
-  }, [cameras, format, resolution, fps, model, cvAlgo, precision, storageMode, storageMedium]);
+  }, [cameras, format, resolution, fps, model, cvAlgo, precision, storageMode, storageMedium, extractRate]);
 
   // --- 核心计算逻辑 ---
   const results = useMemo(() => {
@@ -183,8 +189,9 @@ export default function App() {
     } else if (storageMode === 'FrameImages') {
       // 假设 JPEG 压缩率 10%
       const mbPerFrame = (resData.pixels * 3 * 0.1) / 1024 / 1024;
-      requiredThroughput = cameras * mbPerFrame * fps;
-      requiredIops = cameras * fps; // 每帧一个文件，高 IOPS
+      const actualExtractRate = Math.min(extractRate, fps); // 抽帧率不能超过总帧率
+      requiredThroughput = cameras * mbPerFrame * actualExtractRate;
+      requiredIops = cameras * actualExtractRate; // 每帧一个文件，高 IOPS
     } else if (storageMode === 'Metadata') {
       // 假设每帧 2KB JSON 数据
       const mbPerFrame = 2 / 1024;
@@ -220,7 +227,7 @@ export default function App() {
       iopsPercent,
       isOverloaded
     };
-  }, [cameras, format, resolution, fps, model, cvAlgo, precision, storageMode, storageMedium, manualDeviceIndex]);
+  }, [cameras, format, resolution, fps, model, cvAlgo, precision, storageMode, storageMedium, extractRate, manualDeviceIndex]);
 
   // 负载条颜色辅助函数
   const getLoadColor = (percent: number) => {
@@ -257,175 +264,233 @@ export default function App() {
           <div className="lg:col-span-5 space-y-6">
             
             {/* 模块一：视频输入参数 (Input) */}
-            <section className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-lg">
-              <div className="flex items-center gap-2 mb-6">
-                <Video className="w-5 h-5 text-blue-400" />
-                <h2 className="text-lg font-medium">视频输入参数 (Input)</h2>
+            <section className="bg-zinc-900 border border-zinc-800 rounded-2xl shadow-lg overflow-hidden transition-all">
+              <div 
+                className="flex items-center justify-between p-6 cursor-pointer hover:bg-zinc-800/50"
+                onClick={() => setIsInputExpanded(!isInputExpanded)}
+              >
+                <div className="flex items-center gap-2">
+                  <Video className="w-5 h-5 text-blue-400" />
+                  <h2 className="text-lg font-medium">视频输入参数 (Input)</h2>
+                  {!isInputExpanded && (
+                    <span className="ml-4 text-sm text-zinc-500">
+                      {cameras}路 | {format} | {resolution} | {fps}FPS
+                    </span>
+                  )}
+                </div>
+                {isInputExpanded ? <ChevronUp className="w-5 h-5 text-zinc-500" /> : <ChevronDown className="w-5 h-5 text-zinc-500" />}
               </div>
               
-              <div className="space-y-5">
-                <div>
-                  <label className="block text-sm font-medium text-zinc-400 mb-2">
-                    摄像头数量：<span className="text-zinc-100 font-semibold">{cameras}</span>
-                  </label>
-                  <input 
-                    type="range" 
-                    min="1" max="16" 
-                    value={cameras} 
-                    onChange={(e) => setCameras(parseInt(e.target.value))}
-                    className="w-full accent-blue-500"
-                  />
-                  <div className="flex justify-between text-xs text-zinc-500 mt-1">
-                    <span>1</span>
-                    <span>16</span>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
+              {isInputExpanded && (
+                <div className="p-6 pt-0 space-y-5 border-t border-zinc-800/50">
                   <div>
-                    <label className="block text-sm font-medium text-zinc-400 mb-2">视频格式</label>
-                    <select 
-                      value={format} 
-                      onChange={(e) => setFormat(e.target.value)}
-                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 outline-none transition-all"
-                    >
-                      {FORMATS.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
-                    </select>
+                    <label className="block text-sm font-medium text-zinc-400 mb-2">
+                      摄像头数量：<span className="text-zinc-100 font-semibold">{cameras}</span>
+                    </label>
+                    <input 
+                      type="range" 
+                      min="1" max="16" 
+                      value={cameras} 
+                      onChange={(e) => setCameras(parseInt(e.target.value))}
+                      className="w-full accent-blue-500"
+                    />
+                    <div className="flex justify-between text-xs text-zinc-500 mt-1">
+                      <span>1</span>
+                      <span>16</span>
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-zinc-400 mb-2">分辨率</label>
-                    <select 
-                      value={resolution} 
-                      onChange={(e) => setResolution(e.target.value as keyof typeof RESOLUTIONS)}
-                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 outline-none transition-all"
-                    >
-                      {Object.entries(RESOLUTIONS).map(([k, v]) => <option key={k} value={k}>{v.name}</option>)}
-                    </select>
-                  </div>
-                </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-zinc-400 mb-2">帧率 (FPS)</label>
-                  <input 
-                    type="number" 
-                    min="1" max="120" 
-                    value={fps} 
-                    onChange={(e) => setFps(parseInt(e.target.value) || 1)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 outline-none transition-all"
-                  />
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-zinc-400 mb-2">视频格式</label>
+                      <select 
+                        value={format} 
+                        onChange={(e) => setFormat(e.target.value)}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 outline-none transition-all"
+                      >
+                        {FORMATS.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-zinc-400 mb-2">分辨率</label>
+                      <select 
+                        value={resolution} 
+                        onChange={(e) => setResolution(e.target.value as keyof typeof RESOLUTIONS)}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 outline-none transition-all"
+                      >
+                        {Object.entries(RESOLUTIONS).map(([k, v]) => <option key={k} value={k}>{v.name}</option>)}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-400 mb-2">帧率 (FPS)</label>
+                    <input 
+                      type="number" 
+                      min="1" max="120" 
+                      value={fps} 
+                      onChange={(e) => setFps(parseInt(e.target.value) || 1)}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 outline-none transition-all"
+                    />
+                  </div>
                 </div>
-              </div>
+              )}
             </section>
 
             {/* 模块二：AI 处理模型 (Processing) */}
-            <section className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-lg">
-              <div className="flex items-center gap-2 mb-6">
-                <Activity className="w-5 h-5 text-purple-400" />
-                <h2 className="text-lg font-medium">AI 处理模型 (Processing)</h2>
+            <section className="bg-zinc-900 border border-zinc-800 rounded-2xl shadow-lg overflow-hidden transition-all">
+              <div 
+                className="flex items-center justify-between p-6 cursor-pointer hover:bg-zinc-800/50"
+                onClick={() => setIsProcessingExpanded(!isProcessingExpanded)}
+              >
+                <div className="flex items-center gap-2">
+                  <Activity className="w-5 h-5 text-purple-400" />
+                  <h2 className="text-lg font-medium">AI 处理模型 (Processing)</h2>
+                  {!isProcessingExpanded && (
+                    <span className="ml-4 text-sm text-zinc-500">
+                      {MODELS[model].name} | CV: {CV_ALGORITHMS[cvAlgo].name} | {precision}
+                    </span>
+                  )}
+                </div>
+                {isProcessingExpanded ? <ChevronUp className="w-5 h-5 text-zinc-500" /> : <ChevronDown className="w-5 h-5 text-zinc-500" />}
               </div>
               
-              <div className="space-y-5">
-                <div>
-                  <label className="block text-sm font-medium text-zinc-400 mb-2">模型选择</label>
-                  <select 
-                    value={model} 
-                    onChange={(e) => setModel(e.target.value as keyof typeof MODELS)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500 outline-none transition-all"
-                  >
-                    {Object.entries(MODELS).map(([k, v]) => (
-                      <option key={k} value={k}>{v.name} (~{v.gflops} GFLOPS)</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-zinc-400 mb-2 flex items-center gap-2">
-                    <Layers className="w-4 h-4" /> 传统 CV 算法复杂度
-                  </label>
-                  <select 
-                    value={cvAlgo} 
-                    onChange={(e) => setCvAlgo(e.target.value as keyof typeof CV_ALGORITHMS)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500 outline-none transition-all"
-                  >
-                    {Object.entries(CV_ALGORITHMS).map(([k, v]) => (
-                      <option key={k} value={k}>{v.name}</option>
-                    ))}
-                  </select>
-                  <p className="text-xs text-zinc-500 mt-2">
-                    * 传统算法 (如光流、滤波) 消耗 CPU/GPU 浮点算力 (GFLOPS)，且受分辨率影响极大。
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-zinc-400 mb-2 flex items-center gap-2">
-                    <Settings2 className="w-4 h-4" /> 推理精度 (Precision)
-                  </label>
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
-                      onClick={() => setPrecision('INT8')}
-                      className={`py-2 px-4 rounded-lg text-sm font-medium border transition-all ${
-                        precision === 'INT8' 
-                          ? 'bg-purple-500/20 border-purple-500 text-purple-300' 
-                          : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:border-zinc-700'
-                      }`}
+              {isProcessingExpanded && (
+                <div className="p-6 pt-0 space-y-5 border-t border-zinc-800/50">
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-400 mb-2">模型选择</label>
+                    <select 
+                      value={model} 
+                      onChange={(e) => setModel(e.target.value as keyof typeof MODELS)}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500 outline-none transition-all"
                     >
-                      INT8 (标准)
-                    </button>
-                    <button
-                      onClick={() => setPrecision('FP16')}
-                      className={`py-2 px-4 rounded-lg text-sm font-medium border transition-all ${
-                        precision === 'FP16' 
-                          ? 'bg-purple-500/20 border-purple-500 text-purple-300' 
-                          : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:border-zinc-700'
-                      }`}
-                    >
-                      FP16 (高精度)
-                    </button>
+                      {Object.entries(MODELS).map(([k, v]) => (
+                        <option key={k} value={k}>{v.name} (~{v.gflops} GFLOPS)</option>
+                      ))}
+                    </select>
                   </div>
-                  <p className="text-xs text-zinc-500 mt-2">
-                    * FP16 模式下，等效算力需求将翻倍 (对比设备 INT8 TOPS 指标的 50%)。
-                  </p>
+
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-400 mb-2 flex items-center gap-2">
+                      <Layers className="w-4 h-4" /> 传统 CV 算法复杂度
+                    </label>
+                    <select 
+                      value={cvAlgo} 
+                      onChange={(e) => setCvAlgo(e.target.value as keyof typeof CV_ALGORITHMS)}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500 outline-none transition-all"
+                    >
+                      {Object.entries(CV_ALGORITHMS).map(([k, v]) => (
+                        <option key={k} value={k}>{v.name}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-zinc-500 mt-2">
+                      * 传统算法 (如光流、滤波) 消耗 CPU/GPU 浮点算力 (GFLOPS)，且受分辨率影响极大。
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-400 mb-2 flex items-center gap-2">
+                      <Settings2 className="w-4 h-4" /> 推理精度 (Precision)
+                    </label>
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        onClick={() => setPrecision('INT8')}
+                        className={`py-2 px-4 rounded-lg text-sm font-medium border transition-all ${
+                          precision === 'INT8' 
+                            ? 'bg-purple-500/20 border-purple-500 text-purple-300' 
+                            : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:border-zinc-700'
+                        }`}
+                      >
+                        INT8 (标准)
+                      </button>
+                      <button
+                        onClick={() => setPrecision('FP16')}
+                        className={`py-2 px-4 rounded-lg text-sm font-medium border transition-all ${
+                          precision === 'FP16' 
+                            ? 'bg-purple-500/20 border-purple-500 text-purple-300' 
+                            : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:border-zinc-700'
+                        }`}
+                      >
+                        FP16 (高精度)
+                      </button>
+                    </div>
+                    <p className="text-xs text-zinc-500 mt-2">
+                      * FP16 模式下，等效算力需求将翻倍 (对比设备 INT8 TOPS 指标的 50%)。
+                    </p>
+                  </div>
                 </div>
-              </div>
+              )}
             </section>
 
             {/* 模块三：存储与 I/O 配置 (Storage) */}
-            <section className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-lg">
-              <div className="flex items-center gap-2 mb-6">
-                <HardDrive className="w-5 h-5 text-orange-400" />
-                <h2 className="text-lg font-medium">存储与 I/O 配置 (Storage)</h2>
+            <section className="bg-zinc-900 border border-zinc-800 rounded-2xl shadow-lg overflow-hidden transition-all">
+              <div 
+                className="flex items-center justify-between p-6 cursor-pointer hover:bg-zinc-800/50"
+                onClick={() => setIsStorageExpanded(!isStorageExpanded)}
+              >
+                <div className="flex items-center gap-2">
+                  <HardDrive className="w-5 h-5 text-orange-400" />
+                  <h2 className="text-lg font-medium">存储与 I/O 配置 (Storage)</h2>
+                  {!isStorageExpanded && (
+                    <span className="ml-4 text-sm text-zinc-500">
+                      {STORAGE_MODES[storageMode].name} | {STORAGE_MEDIUMS[storageMedium].name}
+                    </span>
+                  )}
+                </div>
+                {isStorageExpanded ? <ChevronUp className="w-5 h-5 text-zinc-500" /> : <ChevronDown className="w-5 h-5 text-zinc-500" />}
               </div>
               
-              <div className="space-y-5">
-                <div>
-                  <label className="block text-sm font-medium text-zinc-400 mb-2">数据存储模式</label>
-                  <select 
-                    value={storageMode} 
-                    onChange={(e) => setStorageMode(e.target.value as keyof typeof STORAGE_MODES)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-orange-500/50 focus:border-orange-500 outline-none transition-all"
-                  >
-                    {Object.entries(STORAGE_MODES).map(([k, v]) => (
-                      <option key={k} value={k}>{v.name}</option>
-                    ))}
-                  </select>
-                </div>
+              {isStorageExpanded && (
+                <div className="p-6 pt-0 space-y-5 border-t border-zinc-800/50">
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-400 mb-2">数据存储模式</label>
+                    <select 
+                      value={storageMode} 
+                      onChange={(e) => setStorageMode(e.target.value as keyof typeof STORAGE_MODES)}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-orange-500/50 focus:border-orange-500 outline-none transition-all"
+                    >
+                      {Object.entries(STORAGE_MODES).map(([k, v]) => (
+                        <option key={k} value={k}>{v.name}</option>
+                      ))}
+                    </select>
+                  </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-zinc-400 mb-2">目标存储介质</label>
-                  <select 
-                    value={storageMedium} 
-                    onChange={(e) => setStorageMedium(e.target.value as keyof typeof STORAGE_MEDIUMS)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-orange-500/50 focus:border-orange-500 outline-none transition-all"
-                  >
-                    {Object.entries(STORAGE_MEDIUMS).map(([k, v]) => (
-                      <option key={k} value={k}>{v.name} (最高 {v.maxThroughput} MB/s)</option>
-                    ))}
-                  </select>
-                  <p className="text-xs text-zinc-500 mt-2">
-                    * 不同的存储介质决定了 I/O 吞吐量和并发写入 (IOPS) 的上限。
-                  </p>
+                  {storageMode === 'FrameImages' && (
+                    <div>
+                      <label className="block text-sm font-medium text-zinc-400 mb-2">
+                        抽帧率 (每秒抽几帧)：<span className="text-zinc-100 font-semibold">{extractRate}</span>
+                      </label>
+                      <input 
+                        type="range" 
+                        min="1" max={fps} 
+                        value={extractRate} 
+                        onChange={(e) => setExtractRate(parseInt(e.target.value))}
+                        className="w-full accent-orange-500"
+                      />
+                      <div className="flex justify-between text-xs text-zinc-500 mt-1">
+                        <span>1</span>
+                        <span>{fps} (Max)</span>
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-400 mb-2">目标存储介质</label>
+                    <select 
+                      value={storageMedium} 
+                      onChange={(e) => setStorageMedium(e.target.value as keyof typeof STORAGE_MEDIUMS)}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-orange-500/50 focus:border-orange-500 outline-none transition-all"
+                    >
+                      {Object.entries(STORAGE_MEDIUMS).map(([k, v]) => (
+                        <option key={k} value={k}>{v.name} (最高 {v.maxThroughput} MB/s)</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-zinc-500 mt-2">
+                      * 不同的存储介质决定了 I/O 吞吐量和并发写入 (IOPS) 的上限。
+                    </p>
+                  </div>
                 </div>
-              </div>
+              )}
             </section>
 
           </div>
